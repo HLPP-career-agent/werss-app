@@ -22,7 +22,8 @@ js = (JS.replace("__COMPANY__", json.dumps({"company_id": "canary", "short": kw,
         .replace("__SPACE_NAME__", "werss-canary")
         .replace("__APP_URL__", APP_URL)
         .replace("__ADMIN_USER__", ADMIN_USER)
-        .replace("__ADMIN_PASS__", ADMIN_PASS))
+        .replace("__ADMIN_PASS__", ADMIN_PASS)
+        .replace("__T2S_FILE__", os.path.join(BATCH, "t2s_map.json")))
 r = subprocess.run(["ego-browser", "nodejs"], input=js, capture_output=True, text=True, timeout=120)
 out = (r.stdout or "") + (r.stderr or "")
 found = -1

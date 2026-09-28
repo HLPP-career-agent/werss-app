@@ -74,6 +74,17 @@ if app_alive; then
     else
       alert_clear weread
     fi
+    # 微信主授权（公众号搜索/添加通道）——与 weread 是两个独立 session；
+    # 失效时搜索接口把错误吞成空结果，批量添加会静默误标"未找到"（2026-09-27 事故）
+    WXRESP=$(curl -s -m 15 "$WERSS_APP_URL/api/v1/wx/mps/search/%E8%B4%B5%E5%B7%9E%E8%8C%85%E5%8F%B0?offset=0&limit=1" \
+        -H "Authorization: Bearer $TOK" 2>/dev/null)
+    if echo "$WXRESP" | grep -q '"list"'; then
+      alert_clear wxauth
+    elif echo "$WXRESP" | grep -qE '50001|重新扫码'; then
+      log "[keepalive] 微信主授权失效，发提醒"
+      notify_important wxauth "微信授权失效，公众号搜索/添加已停" \
+        "批量添加已暂停（金丝雀自动拦截，台账零污染）。处理：菜单栏「微信授权待扫码」直达授权页，或运行 bin/open_scan_page.sh --wx"
+    fi
   else
     log "[keepalive] 管理端登录失败（检查 config.env 凭据）"
     notify_important login "管理端登录失败" "请检查 config.env 的 WERSS_ADMIN_USER / WERSS_ADMIN_PASS"

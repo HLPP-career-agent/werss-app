@@ -49,7 +49,8 @@ def run_js(company, mode="add"):
           .replace("__SPACE_NAME__", SPACE_NAME)
           .replace("__APP_URL__", APP_URL)
           .replace("__ADMIN_USER__", ADMIN_USER)
-          .replace("__ADMIN_PASS__", ADMIN_PASS))
+          .replace("__ADMIN_PASS__", ADMIN_PASS)
+          .replace("__T2S_FILE__", os.path.join(BATCH, "t2s_map.json")))
     try:
         r = subprocess.run(["ego-browser", "nodejs"], input=js, capture_output=True,
                            text=True, timeout=200)
@@ -141,6 +142,22 @@ if not items:
 if not app_alive():
     print("ABORT:app_down")
     sys.exit(1)
+
+# 开 chunk 先金丝雀探测搜索可用性（教训：微信主授权 session 静默失效时，搜索全部返回
+# "未找到"，而 chunk 只处理 3-4 家就被 runner 重启、循环内"连续 N 次未找到"阈值永远
+# 够不着，导致 598 家被误标未找到。探测必须在写任何台账之前做）。
+# 注：add_company.js 的 canary 模式固定搜"平安银行"，注入的关键词仅作日志展示。
+canary_kw = next_canary_kw()
+acquire_browser_lock()
+try:
+    canary = run_js({"company_id": "canary", "short": canary_kw,
+                     "name": canary_kw + "股份有限公司"}, mode="canary")
+finally:
+    release_browser_lock()
+if canary.get("found", 0) == 0:
+    say(f"ABORT:search_throttled(开chunk金丝雀搜索失败,微信授权/搜索不可用,本轮未写任何台账)")
+    sys.exit(1)
+say(f"  [开chunk金丝雀通过({canary.get('found')}条)]")
 
 lock = browser_lock()
 while time.time() - start < BUDGET and items:

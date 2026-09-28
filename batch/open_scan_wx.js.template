@@ -1,0 +1,51 @@
+import fs from "node:fs";
+// __W__ / __APP_URL__ / __ADMIN_USER__ / __ADMIN_PASS__ 由 bin/open_scan_page.sh --wx 渲染注入
+// 目的：把 ego 浏览器带到「授权管理」页（微信主授权，公众号搜索/添加通道；注意与
+// 微信读书授权是两个独立二维码），自动登录并点出二维码，页面保持打开供用户扫码
+const W = "__W__";
+const appUrl = "__APP_URL__";
+const adminUser = "__ADMIN_USER__";
+const adminPass = "__ADMIN_PASS__";
+
+let task;
+try { task = await taskSpace(parseInt(fs.readFileSync(`${W}/space_keepalive.id`, "utf8"))); }
+catch (e) {
+  task = await taskSpace("werss-keepalive");
+  try { fs.writeFileSync(`${W}/space_keepalive.id`, String(task.spaceId)); } catch {}
+}
+let page;
+const ps = await task.pages();
+page = ps.length ? ps[ps.length - 1] : await task.newPage();
+
+try {
+  await page.goto(appUrl);
+  await page.waitForLoadState();
+  await page.waitForTimeout(1500);
+  // 自动登录（如需要）
+  const loginVisible = await page.evaluate(
+    () => !!document.querySelector("input[placeholder='请输入帐号']")
+  );
+  if (loginVisible) {
+    await page.fill("input[placeholder='请输入帐号']", adminUser);
+    await page.fill("input[placeholder='请输入密码']", adminPass);
+    await page.click("loc=role:button[name='登录']");
+    await page.waitForTimeout(3500);
+  }
+  // 直达授权管理页（微信主授权二维码所在）
+  await page.goto(appUrl + "/wechat-status");
+  await page.waitForLoadState();
+  await page.waitForTimeout(2000);
+  // 若页面提供「扫码/授权」按钮则点击，让二维码直接展示
+  try {
+    await page.evaluate(() => {
+      const b = [...document.querySelectorAll("button")].find(
+        (x) => /扫码|重新授权|授权/.test(x.textContent) && x.getClientRects().length
+      );
+      b && b.click();
+    });
+    await page.waitForTimeout(2500);
+  } catch (e) {}
+  console.log("SCAN_PAGE_READY title=" + (await page.title()).slice(0, 30));
+} catch (err) {
+  console.log("SCAN_PAGE_FAIL " + String(err).slice(0, 150));
+}

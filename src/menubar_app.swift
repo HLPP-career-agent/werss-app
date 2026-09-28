@@ -36,7 +36,7 @@ enum History {
     }
 }
 
-// ---- 7 天趋势图（纯 AppKit 自绘；三列：左饼图（公众号进度 csv_added/pending/notfound）+ 右上公众号曲线 + 右下文章曲线）----
+// ---- 7 天趋势图（纯 AppKit 自绘；三列：左饼图（公众号进度 csv_added/pending/notfound）+ 右上公众号小时柱 + 右下文章天柱）----
 final class TrendView: NSView {
     var samples: [Sample] = [] { didSet { needsDisplay = true } }
     var articlesSub = "" { didSet { needsDisplay = true } }   // 如 "正文 790"
@@ -51,6 +51,22 @@ final class TrendView: NSView {
 
     // 7 天 × 24 小时柱状图：168 根柱子（每天一组 24 根），高度 = 该小时增量；x 轴每天显示一次日期；组间用浅色分隔线
     // liveValue（status.sh 实时 feeds/articles）覆盖今天当前小时 lastValue 并重算 delta
+    // 头行：色点 名称 [副信息] …… 当前值（公众号/文章两图共用）
+    private func drawHead(_ rect: NSRect, name: String, color: NSColor, sub: String?, lastValue: Double) {
+        color.setFill()
+        NSBezierPath(roundedRect: NSRect(x: rect.minX, y: rect.maxY - 8, width: 4, height: 4), xRadius: 1.5, yRadius: 1.5).fill()
+        let nameAttrs: [NSAttributedString.Key: Any] = [.font: NSFont.boldSystemFont(ofSize: 10), .foregroundColor: NSColor.secondaryLabelColor]
+        (name as NSString).draw(at: NSPoint(x: rect.minX + 10, y: rect.maxY - 12), withAttributes: nameAttrs)
+        if let sub = sub, !sub.isEmpty {
+            let nx = rect.minX + 10 + (name as NSString).size(withAttributes: nameAttrs).width + 6
+            (sub as NSString).draw(at: NSPoint(x: nx, y: rect.maxY - 12),
+                withAttributes: [.font: NSFont.systemFont(ofSize: 8), .foregroundColor: NSColor.tertiaryLabelColor])
+        }
+        let head = NSMutableAttributedString()
+        head.append(NSAttributedString(string: "\(Int(lastValue))", attributes: [.font: NSFont.boldSystemFont(ofSize: 12), .foregroundColor: NSColor.labelColor]))
+        head.draw(at: NSPoint(x: rect.maxX - head.size().width - 2, y: rect.maxY - 13))
+    }
+
     private func drawBars(_ rect: NSRect, name: String, color: NSColor, samples: [Sample], value: (Sample) -> Double, sub: String?, axisBottom: Bool, liveValue: Double = -1) {
         // rect 结构：[头行 13][曲线区][底 12]
         var daily = dailyBars(samples, value: value)            // 168 项（7×24）
@@ -67,20 +83,7 @@ final class TrendView: NSView {
         // 头行当前值 = 今天当前小时桶的 lastValue（实时覆盖后即最新累计值）
         // 不能读 daily.last——那是今天 23 点的桶，未来小时 lastValue 恒为 0，会整天显示 0
         let lastValue = daily[min(currentIdx, daily.count - 1)].lastValue
-
-        // 头行：色点 名称 [副信息] …… 当前值
-        color.setFill()
-        NSBezierPath(roundedRect: NSRect(x: rect.minX, y: rect.maxY - 8, width: 4, height: 4), xRadius: 1.5, yRadius: 1.5).fill()
-        let nameAttrs: [NSAttributedString.Key: Any] = [.font: NSFont.boldSystemFont(ofSize: 10), .foregroundColor: NSColor.secondaryLabelColor]
-        (name as NSString).draw(at: NSPoint(x: rect.minX + 10, y: rect.maxY - 12), withAttributes: nameAttrs)
-        if let sub = sub, !sub.isEmpty {
-            let nx = rect.minX + 10 + (name as NSString).size(withAttributes: nameAttrs).width + 6
-            (sub as NSString).draw(at: NSPoint(x: nx, y: rect.maxY - 12),
-                withAttributes: [.font: NSFont.systemFont(ofSize: 8), .foregroundColor: NSColor.tertiaryLabelColor])
-        }
-        let head = NSMutableAttributedString()
-        head.append(NSAttributedString(string: "\(Int(lastValue))", attributes: [.font: NSFont.boldSystemFont(ofSize: 12), .foregroundColor: NSColor.labelColor]))
-        head.draw(at: NSPoint(x: rect.maxX - head.size().width - 2, y: rect.maxY - 13))
+        drawHead(rect, name: name, color: color, sub: sub, lastValue: lastValue)
 
         // 柱状区
         let chart = NSRect(x: rect.minX, y: rect.minY + (axisBottom ? 12 : 5), width: rect.width, height: rect.height - 24)
@@ -159,6 +162,82 @@ final class TrendView: NSView {
         }
     }
 
+    // 文章 7 天柱状图（按天）：文章列表经微信读书通道同步，实测每天只在风控放行窗口（约 0 点后几分钟）
+    // 成功落库一批，一天之内没有小时级变化，小时柱全贴地——所以与公众号的小时柱分开，每根柱 = 当天文章增量。
+    // 数据聚合复用 dailyBars 的小时分桶结果按天求和（含 status.sh 实时值对当前小时的覆盖），头行同款显示当前累计
+    private func drawDayBars(_ rect: NSRect, name: String, color: NSColor, samples: [Sample], value: (Sample) -> Double, sub: String?, liveValue: Double = -1) {
+        var hourly = dailyBars(samples, value: value)           // 168 项（7×24）
+        let currentIdx = 6 * 24 + Calendar.current.component(.hour, from: Date())
+
+        // status.sh 实时值覆盖今天当前小时（与小时图同一逻辑，保证头行是最新累计值）
+        if liveValue >= 0, currentIdx < hourly.count {
+            let prevHourVal: Double = currentIdx > 0 ? hourly[currentIdx - 1].lastValue : 0
+            let hourDelta = prevHourVal > 0 ? max(0, liveValue - prevHourVal) : 0
+            hourly[currentIdx] = (day: hourly[currentIdx].day, lastValue: liveValue, delta: hourDelta)
+        }
+
+        let lastValue = hourly[min(currentIdx, hourly.count - 1)].lastValue
+        drawHead(rect, name: name, color: color, sub: sub, lastValue: lastValue)
+
+        // 按天聚合：柱高 = 当天增量（该天 24 个小时 delta 之和）
+        let chart = NSRect(x: rect.minX, y: rect.minY + 12, width: rect.width, height: rect.height - 24)
+        var dayTotals: [Double] = []
+        for d in 0..<7 {
+            dayTotals.append((0..<24).reduce(0.0) { $0 + max(0, hourly[d*24 + $1].delta) })
+        }
+        let maxDelta = max(dayTotals.max() ?? 0, 1)
+        let slotW = chart.width / 7
+        let barW = max(8, slotW - 8)     // 柱间留缝：7 根粗柱，与小时 barcode 风格区分
+        let baseY = chart.minY
+
+        for d in 0..<7 {
+            let x = chart.minX + CGFloat(d) * slotW + (slotW - barW) / 2
+            // 底座：无增量的天也画浅色短底，让 7 天位置都肉眼可见
+            NSColor.tertiaryLabelColor.withAlphaComponent(0.45).setFill()
+            NSBezierPath(roundedRect: NSRect(x: x, y: baseY, width: barW, height: 1.5), xRadius: 0.3, yRadius: 0.3).fill()
+            let total = dayTotals[d]
+            guard total > 0 else { continue }
+            let h = max(1.5, CGFloat(total / maxDelta) * chart.height)
+            color.setFill()
+            NSBezierPath(roundedRect: NSRect(x: x, y: baseY, width: barW, height: h), xRadius: 0.3, yRadius: 0.3).fill()
+        }
+
+        // 每根柱顶上方标注当天增量（光晕描边保证可读，与小时图同款手法）
+        let totalAttrs: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 8, weight: .bold),
+            .foregroundColor: NSColor.labelColor,
+        ]
+        let totalHaloAttrs = totalAttrs.merging([.foregroundColor: NSColor.windowBackgroundColor]) { _, new in new }
+        for d in 0..<7 {
+            let total = dayTotals[d]
+            guard total > 0 else { continue }
+            let h = max(1.5, CGFloat(total / maxDelta) * chart.height)
+            let x = chart.minX + CGFloat(d) * slotW + slotW / 2
+            let txt = "\(Int(total))" as NSString
+            let size = txt.size(withAttributes: totalAttrs)
+            let lx = min(max(chart.minX, x - size.width / 2), chart.maxX - size.width)
+            let ly = min(baseY + h + 1, chart.maxY - size.height - 2)
+            for (dx, dy) in [(-1.0, 0.0), (1.0, 0.0), (0.0, -1.0), (0.0, 1.0)] {
+                txt.draw(at: NSPoint(x: lx + dx, y: ly + dy), withAttributes: totalHaloAttrs)
+            }
+            txt.draw(at: NSPoint(x: lx, y: ly), withAttributes: totalAttrs)
+        }
+
+        // x 轴日期：每天柱子正下方一个标签
+        let lAttrs: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 8),
+            .foregroundColor: NSColor.tertiaryLabelColor,
+        ]
+        let df = DateFormatter(); df.dateFormat = "d"
+        for d in 0..<7 {
+            let txt = df.string(from: hourly[d * 24].day) as NSString
+            let x = chart.minX + CGFloat(d) * slotW + slotW / 2
+            let size = txt.size(withAttributes: lAttrs)
+            let lx = min(max(chart.minX, x - size.width / 2), chart.maxX - size.width)
+            txt.draw(at: NSPoint(x: lx, y: rect.minY + 1), withAttributes: lAttrs)
+        }
+    }
+
     // 按小时分桶：最近 7 天 × 24 小时 = 168 项（day 0..6，day 6 = 今天）；每项代表那一个小时
     // delta = max(0, lastValue - 前一小时 lastValue)；基线取窗口(7天)前最后一个采样（load 保留 15 天）
     // 没有基线时（如刚装机）窗口内首个采样只作起点 delta=0——否则全量累计值会被当成一小时的增量画出巨柱
@@ -214,19 +293,19 @@ final class TrendView: NSView {
 
     override func draw(_ dirtyRect: NSRect) {
         let inner = NSRect(x: bounds.minX + 14, y: bounds.minY + 6, width: bounds.width - 28, height: bounds.height - 14)
-        // 三列布局：左饼图（~1/3 宽）+ 间隔 + 右上公众号柱状图 + 右下文章柱状图
+        // 三列布局：左饼图（~1/3 宽）+ 间隔 + 右上公众号小时柱状图 + 右下文章天柱状图
         let pieW: CGFloat = 96
         let gap: CGFloat = 14
         let trendX = inner.minX + pieW + gap
         let trendW = inner.maxX - trendX
         // 左列：饼图 + 图例 + 总数（垂直排列）
         drawPieChart(in: NSRect(x: inner.minX, y: inner.minY, width: pieW, height: inner.height))
-        // 右两行：公众号 + 文章 7 天柱状图（与饼图同高度）
+        // 右两行：公众号小时柱（数据全天都有）+ 文章天柱（数据每天仅午夜落库一批，见 drawDayBars 注释）
         let rowH = (inner.height - 16) / 2
         drawBars(NSRect(x: trendX, y: inner.minY + rowH + 16, width: trendW, height: rowH),
                  name: "公众号", color: .controlAccentColor, samples: samples, value: { $0.feeds }, sub: nil, axisBottom: false, liveValue: liveFeeds)
-        drawBars(NSRect(x: trendX, y: inner.minY, width: trendW, height: rowH),
-                 name: "文章", color: .systemOrange, samples: samples, value: { $0.articles }, sub: articlesSub.isEmpty ? nil : articlesSub, axisBottom: true, liveValue: liveArticles)
+        drawDayBars(NSRect(x: trendX, y: inner.minY, width: trendW, height: rowH),
+                 name: "文章", color: .systemOrange, samples: samples, value: { $0.articles }, sub: articlesSub.isEmpty ? nil : articlesSub, liveValue: liveArticles)
     }
 
     // 左列饼图：饼图（56px 直径，居顶）+ 3 行图例（已采/待采/未找到）+ 总数
@@ -343,11 +422,13 @@ final class StatusRowView: NSView {
 struct Status {
     var dict: [String: String] = [:]
     var wereadFail: Bool { dict["weread"] == "FAIL" || dict["weread"] == "LOGINERR" }
+    // 微信主授权（公众号搜索/添加通道），与微信读书授权是两个独立凭证
+    var wxAuthFail: Bool { dict["wx_auth"] == "EXPIRED" }
     var runnerDown: Bool { dict["runner"] == "DOWN" && sliceLeft > 0 }
     var appDown: Bool { dict["app"] != "OK" || dict["container"] != "UP" }
     var dockerDown: Bool { dict["docker"] == "DOWN" }
     var sliceLeft: Int { Int(dict["slice"] ?? "-1") ?? -1 }
-    var level: Int { dockerDown ? 3 : (appDown ? 3 : (wereadFail || runnerDown ? 2 : 1)) }
+    var level: Int { dockerDown ? 3 : (appDown ? 3 : (wereadFail || wxAuthFail || runnerDown ? 2 : 1)) }
 }
 
 // ---- 可点击通知：真 App 进程 + 事件循环，权限/点击回调均可用 ----
@@ -388,6 +469,7 @@ final class Notifier: NSObject, UNUserNotificationCenterDelegate {
         let action = response.notification.request.content.userInfo["action"] as? String ?? "admin"
         switch action {
         case "scan":   runSh("bash '\(root)/bin/open_scan_page.sh'")
+        case "wxscan": runSh("bash '\(root)/bin/open_scan_page.sh' --wx")
         case "repair": runSh("bash '\(root)/bin/keepalive.sh'")
         case "review": DispatchQueue.main.async { ReviewWindowController.shared.show() }
         default:       runSh("open http://localhost:8001/")
@@ -402,6 +484,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var lastLevel = 0
     var prevWereadFail = false
     var lastWereadNag: Date?
+    var prevWxAuthFail = false
+    var lastWxNag: Date?
     var lastFaultNag: Date?
     var lastSample = Date.distantPast
     var samples: [Sample] = []
@@ -433,6 +517,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 if kv.count == 2 { d[String(kv[0]).trimmingCharacters(in: .whitespaces)] = String(kv[1]).trimmingCharacters(in: .whitespaces) }
             }
             self.prevWereadFail = self.st.wereadFail
+            self.prevWxAuthFail = self.st.wxAuthFail
             self.lastLevel = self.st.level
             self.st = Status()
             self.st.dict = d
@@ -482,6 +567,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 action: "scan")
             lastWereadNag = now
         }
+        // 微信主授权（公众号搜索/添加通道）失效：批量添加已被金丝雀自动暂停，需重新扫码
+        if st.wxAuthFail && (!prevWxAuthFail || lastWxNag == nil || now.timeIntervalSince(lastWxNag!) > 1800) {
+            Notifier.shared.post(id: "werss-wxauth",
+                title: "微信授权失效，公众号搜索/添加已停",
+                body: "点此直达授权管理页扫码（自动登录）。扫码后采集自动恢复",
+                action: "wxscan")
+            lastWxNag = now
+        }
         if st.level == 3 && (lastLevel < 3 || lastFaultNag == nil || now.timeIntervalSince(lastFaultNag!) > 1800) {
             Notifier.shared.post(id: "werss-fault",
                 title: "werss 系统故障",
@@ -493,6 +586,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             Notifier.shared.post(id: "werss-recovered",
                 title: "微信读书授权已恢复",
                 body: "文章正文采集将自动继续（≤10 分钟内下一轮补抓生效）",
+                action: "admin", sound: false)
+        }
+        if prevWxAuthFail && !st.wxAuthFail {
+            Notifier.shared.post(id: "werss-wxrecovered",
+                title: "微信授权已恢复",
+                body: "公众号搜索/添加已恢复，采集自动继续",
                 action: "admin", sound: false)
         }
         if lastLevel >= 2 && st.level == 1 {
@@ -568,26 +667,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // 公众号进度（饼图 + 公众号trend + 文章trend）合并到一个 TrendView 里做三列布局
         addStatusRow("runner \(d["runner"] ?? "?") · 磁盘 \(d["disk_gb"] ?? "?")G · 备份 \(d["backup_days"] ?? "?")天前")
         // 微信读书授权 + 上次扫码时间 + 限流
+        // 上次扫码时间所有已判定状态都显示——失效待扫码时最需要知道授权是多久前认证的
         let wereadState = d["weread"] ?? "?"
+        let lastScanSuffix: String
+        if let tsStr = d["weread_ok_at"], let ts = TimeInterval(tsStr), ts > 0 {
+            lastScanSuffix = " · 上次扫码 \(formatAge(Date().timeIntervalSince1970 - ts))前"
+        } else {
+            lastScanSuffix = ""
+        }
         var wereadText: String
         switch wereadState {
         case "OK":
-            // OK 时拼上"上次扫码 X 前"；没记录过时间戳则只显示 OK
-            if let tsStr = d["weread_ok_at"], let ts = TimeInterval(tsStr), ts > 0 {
-                let ageSec = Date().timeIntervalSince1970 - ts
-                wereadText = "微信读书 OK · 上次扫码 \(formatAge(ageSec))前"
-            } else {
-                wereadText = "微信读书 OK"
-            }
+            wereadText = "微信读书 OK" + lastScanSuffix
         case "FAIL":
-            wereadText = "微信读书 失效待扫码"
+            wereadText = "微信读书 失效待扫码" + lastScanSuffix
         case "LOGINERR":
-            wereadText = "微信读书 登录失败"
+            wereadText = "微信读书 登录失败" + lastScanSuffix
         default:
             wereadText = "微信读书 \(wereadState)"
         }
         let throttled = d["throttled"] == "yes" ? "冷却中" : "无"
         addStatusRow("\(wereadText) · 限流 \(throttled)")
+        // 微信主授权（公众号搜索/添加通道）+ 上次扫码时间——与微信读书授权独立的凭证，
+        // 失效时批量添加静默停摆，状态行必须一眼可见
+        let wxState = d["wx_auth"] ?? "?"
+        let wxScanSuffix: String
+        if let tsStr = d["wx_ok_at"], let ts = TimeInterval(tsStr), ts > 0 {
+            wxScanSuffix = " · 上次扫码 \(formatAge(Date().timeIntervalSince1970 - ts))前"
+        } else {
+            wxScanSuffix = ""
+        }
+        let wxText: String
+        switch wxState {
+        case "OK":      wxText = "微信授权(搜索) OK" + wxScanSuffix
+        case "EXPIRED": wxText = "微信授权(搜索) 失效待扫码" + wxScanSuffix
+        default:        wxText = "微信授权(搜索) \(wxState)"
+        }
+        addStatusRow(wxText)
 
         // 7 天趋势（三列布局：左饼图 + 右上公众号曲线 + 右下文章曲线）
         let trendItem = NSMenuItem()
@@ -612,18 +728,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         menu.addItem(mkItem(jobsTitle, action: #selector(openReview), bold: jobsUnseen > 0))
 
-        if st.wereadFail || st.runnerDown || st.appDown || st.dockerDown {
+        if st.wereadFail || st.wxAuthFail || st.runnerDown || st.appDown || st.dockerDown {
             menu.addItem(NSMenuItem.separator())
             menu.addItem(mkItem("── 待办（点击直达）──"))
             if st.wereadFail { menu.addItem(mkItem("→ 微信读书待扫码：ego 自动登录", action: #selector(openScan), bold: true)) }
+            if st.wxAuthFail { menu.addItem(mkItem("→ 微信授权待扫码（搜索/添加已停）：直达授权页", action: #selector(openWxScan), bold: true)) }
             if st.appDown || st.dockerDown { menu.addItem(mkItem("→ 系统故障：立即保活修复", action: #selector(runKeepalive), bold: true)) }
             else if st.runnerDown { menu.addItem(mkItem("→ runner 未运行：拉起", action: #selector(runKeepalive), bold: true)) }
         }
 
         menu.addItem(NSMenuItem.separator())
         menu.addItem(mkItem("打开管理页", action: #selector(openAdmin)))
-        menu.addItem(mkItem("ego 自动登录 → 扫码页", action: #selector(openScan)))
+        menu.addItem(mkItem("ego 自动登录 → 扫码页（微信读书）", action: #selector(openScan)))
+        menu.addItem(mkItem("ego 自动登录 → 授权页（微信主授权）", action: #selector(openWxScan)))
         menu.addItem(mkItem("立即保活检查", action: #selector(runKeepalive)))
+        // 文章同步频率：父项即现状显示（任务名/cron/启停），子菜单快速切换。
+        // 走 we-mp-rss 官方 REST API（与网页端任务管理同款接口），容器程序零改动。
+        // 注：文章数据经微信读书通道同步，白天常被风控拦、仅午夜放行窗口落库——
+        // 调高频率不必然带来白天数据，但接口能力在此，按需选择。
+        let syncCron = d["sync_task_cron"] ?? ""
+        let syncParent = NSMenuItem(title: syncTitle(cron: syncCron,
+                                                     name: d["sync_task_name"] ?? "",
+                                                     enabled: (d["sync_task_status"] ?? "") == "1"),
+                                    action: nil, keyEquivalent: "")
+        let syncSub = NSMenu()
+        for (label, cron, name) in [("每小时", "0 * * * *", "每小时全量更新"),
+                                    ("每2小时", "0 */2 * * *", "每2小时全量更新"),
+                                    ("每4小时", "0 */4 * * *", "每4小时全量更新"),
+                                    ("每6小时", "0 */6 * * *", "每6小时全量更新"),
+                                    ("每12小时", "0 */12 * * *", "每12小时全量更新"),
+                                    ("每天一次（0 点）", "0 0 * * *", "每天全量更新")] {
+            let it = NSMenuItem(title: "\(label)（\(cron)）", action: #selector(setSyncCron(_:)), keyEquivalent: "")
+            it.target = self
+            it.representedObject = "\(cron)\t\(name)"
+            it.state = cron == syncCron ? .on : .off
+            syncSub.addItem(it)
+        }
+        syncParent.submenu = syncSub
+        menu.addItem(syncParent)
         menu.addItem(NSMenuItem.separator())
         menu.addItem(mkItem("交接导出（打备份包）", action: #selector(doExport)))
         menu.addItem(mkItem("交接导入（选备份包）", action: #selector(doImport)))
@@ -667,6 +809,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if h < 24 { return "\(h)时" }
         let d = h / 24
         return "\(d)天"
+    }
+
+    // 文章同步子菜单父项标题 = 现状显示：人类频率 + 原始 cron + 任务名（+ 停用标记）
+    private func syncTitle(cron: String, name: String, enabled: Bool) -> String {
+        guard !cron.isEmpty else { return "文章同步：未配置定时任务" }
+        let human: String
+        switch cron {
+        case "0 * * * *":   human = "每小时"
+        case "0 */2 * * *": human = "每2小时"
+        case "0 */4 * * *": human = "每4小时"
+        case "0 */6 * * *": human = "每6小时"
+        case "0 */12 * * *": human = "每12小时"
+        case "0 0 * * *":   human = "每天一次"
+        default:            human = cron
+        }
+        var t = "文章同步：\(human)（\(cron)"
+        if !name.isEmpty { t += " · \(name)" }
+        return t + (enabled ? "）" : "）· 已停用")
     }
 
     // 解析一行原始日志 → (类型, "HH:MM workerN 暂停 Xs" / "已添加 name" / "未找到")
@@ -729,7 +889,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             DispatchQueue.main.async { self?.refresh() }
         }
     }
+    // 微信主授权（公众号搜索/添加通道）扫码页——与微信读书扫码页是两个不同页面
+    @objc func openWxScan() {
+        statusItem.button?.title = "ego ⏳"
+        runSh("open -a 'ego lite' 2>/dev/null")
+        runShCapture("bash '\(root)/bin/open_scan_page.sh' --wx", timeout: 120) { [weak self] _ in
+            runSh("open -a 'ego lite' 2>/dev/null")
+            DispatchQueue.main.async { self?.refresh() }
+        }
+    }
     @objc func runKeepalive() { runSh("bash '\(root)/bin/keepalive.sh'") }
+
+    // 子菜单选中新频率：article_sync_cron.sh 经官方 API 改任务 cron 并重载调度器，完成后立刻刷新状态行勾选
+    @objc func setSyncCron(_ sender: NSMenuItem) {
+        guard let rep = sender.representedObject as? String else { return }
+        let parts = rep.components(separatedBy: "\t")
+        guard parts.count >= 2 else { return }
+        statusItem.button?.title = "werss ⏳"
+        runShCapture("bash '\(root)/bin/article_sync_cron.sh' set '\(parts[0])' '\(parts[1])'", timeout: 60) { [weak self] _ in
+            DispatchQueue.main.async { self?.refresh() }
+        }
+    }
     @objc func doExport() { NSWorkspace.shared.open(rootURL.appendingPathComponent("交接导出.command")) }
     @objc func doImport() { NSWorkspace.shared.open(rootURL.appendingPathComponent("交接导入.command")) }
     @objc func quit() { NSApplication.shared.terminate(nil) }

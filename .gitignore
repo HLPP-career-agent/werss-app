@@ -12,6 +12,7 @@ batch/*
 !batch/*.js
 !batch/*.template
 !batch/canary_pool.json
+!batch/t2s_map.json
 
 # 生成的临时文件
 *.gen.js

@@ -77,11 +77,30 @@ function buildCandidates() {
   return out;
 }
 
-// 某个公众号名是否匹配核心词:去掉核心词后剩余部分只能是中性修饰词
+// ---- 归一化:全角→半角 + 繁→简(映射表由 process_chunk/canary 注入路径,来自台账词表) ----
+// 教训:港股台账用繁体+全角(星光集團/ＳＯＨＯ中國),公众号名几乎全是简体+半角
+// (星光集团有限公司/SOHO中国)。微信搜索能兜住繁体(首条即正确账号),但本地
+// includes() 匹配必须两侧归一,否则港交所队列命中率 0%。
+let T2S = {};
+try { T2S = JSON.parse(fs.readFileSync("__T2S_FILE__", "utf8")); } catch (e) {}
+function norm(s) {
+  if (!s) return "";
+  let out = "";
+  for (const ch of s) {
+    const c = ch.codePointAt(0);
+    if (c >= 0xff01 && c <= 0xff5e) out += String.fromCharCode(c - 0xfee0);
+    else out += T2S[ch] || ch;
+  }
+  return out.toLowerCase();
+}
+
+// 某个公众号名是否匹配核心词:归一化后去掉核心词,剩余部分只能是中性修饰词
+// (有限 补进宽容表:账号常叫「XX有限公司」,而「有限」不在原来在的词表里)
 function isMatch(opt, core) {
-  if (!opt.includes(core)) return false;
-  const rest = opt.split(core).join("");
-  return /^(招聘|集团|股份|控股|公司|官方|招聘号|招聘平台|招聘中心|招聘官方号|号|平台|中心|[A-Za-z0-9])*$/.test(rest);
+  const o = norm(opt), c = norm(core);
+  if (!o.includes(c)) return false;
+  const rest = o.split(c).join("");
+  return /^(招聘|有限|集团|股份|控股|公司|官方|招聘号|招聘平台|招聘中心|招聘官方号|号|平台|中心|[a-z0-9])*$/.test(rest);
 }
 
 async function openDialog() {
@@ -181,7 +200,8 @@ try {
 
   if (mode === "canary") {
     await openDialog();
-    const opts = await searchOptions("平安银行");
+    // 用注入的轮换词（process_chunk.next_canary_kw 从池里取），避免固定词被应用/微信缓存造成假阳性
+    const opts = await searchOptions(company.short || "平安银行");
     await closeDialog();
     result({ status: "canary", found: (opts || []).length });
     process.exit(0);
@@ -198,8 +218,14 @@ try {
     if (!opts || opts.length === 0) continue;
     const core = cand.replace(/招聘$/, "");
     const matches = opts.filter((o) => isMatch(o, core));
+    if (matches.length === 0) continue;
+    // 选择优先级:带「招聘」的归一匹配(招聘号优先,最短者) > 归一化完全相等 > 最短归一匹配。
+    // 兜底取最短:繁体关键词搜回的账号名常带「有限公司」等后缀(星光集團→星光集团有限公司),
+    // 旧逻辑只认完全相等会放走唯一正确账号。
     const withZp = matches.filter((o) => o.includes("招聘"));
-    const target = withZp.sort((a, b) => a.length - b.length)[0] || matches.find((o) => o === core) || null;
+    const exact = matches.find((o) => norm(o) === norm(core));
+    const shortest = matches.slice().sort((a, b) => norm(a).length - norm(b).length)[0];
+    const target = withZp.sort((a, b) => a.length - b.length)[0] || exact || shortest || null;
     if (target) { picked = target; break; }
   }
 

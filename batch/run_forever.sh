@@ -4,6 +4,20 @@
 . "$(cd "$(dirname "$0")/.." && pwd)/bin/lib.sh"
 cd "$BATCH"
 
+# 单实例守卫:keepalive 自动拉起与手动重启可能撞出双循环，双 runner 会并发处理
+# 同一 slice（重复处理 + write_slice 互相覆盖队列）。目录锁 + 10 分钟陈旧残留清理。
+LOCKD="$BATCH/runner.lock.d"
+if ! mkdir "$LOCKD" 2>/dev/null; then
+  if [ $(( $(date +%s) - $(stat -f %m "$LOCKD" 2>/dev/null || date +%s) )) -gt 600 ]; then
+    rmdir "$LOCKD"   # 超过 10 分钟视为死循环残留
+    mkdir "$LOCKD" || { echo "[runner] 守卫锁仍被占用,退出"; exit 1; }
+  else
+    echo "$(date '+%m-%d %H:%M:%S') [runner] 已有实例在运行,退出"
+    exit 0
+  fi
+fi
+trap 'rmdir "$LOCKD" 2>/dev/null' EXIT
+
 echo "$(date '+%m-%d %H:%M:%S') [runner] 启动无限循环"
 while true; do
   all_done=1
