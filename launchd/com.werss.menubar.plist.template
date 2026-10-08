@@ -10,7 +10,12 @@
     </array>
     <key>RunAtLoad</key>
     <true/>
+    <!-- SuccessfulExit=false: 仅异常退出(崩溃/被信号杀)才拉起;菜单「退出」等正常退出(exit 0)保持退出。
+         重新拉起用 launchctl kickstart gui/$(id -u)/com.werss.menubar(不带 -k,任务仍在 launchd 只是没在跑)。 -->
     <key>KeepAlive</key>
-    <true/>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
 </dict>
 </plist>

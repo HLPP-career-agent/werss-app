@@ -57,6 +57,19 @@ async function ensureApp() {
     await page.fill("input[placeholder='请输入密码']", adminPass);
     await page.click("loc=role:button[name='登录']");
     await page.waitForTimeout(3500);
+    // 登录失败必须抛错(2026-10-04 事故):这里原本静默往下走,页面停在 /login,
+    // 随后 openDialog 等「请输入公众号名称」超时抛 JS_ERROR,而该错误没有 found 字段,
+    // 被 process_chunk 的金丝雀判定吃成"限流"→ 连续 9 轮各冷却 40 分钟,白转 7 小时。
+    // 注意:后端 5xx 时前端会显示"用户名或密码错误,您的帐号已锁定"这类兜底文案,
+    // 与真实密码错误无法区分,所以额外带上当前页面是否存在订阅按钮用于交叉验证。
+    if (await page.evaluate(() => !!document.querySelector("input[placeholder='请输入帐号']"))) {
+      const diag = await page.evaluate(() => {
+        const txt = document.body.innerText.replace(/\s+/g, " ").trim();
+        const m = txt.match(/(用户名或密码错误[^,，。]*|帐?号已锁定[^,，。]*|验证码[^,，。]*|登录[^,，。]{0,12}失败[^,，。]*)/);
+        return { url: location.href, tip: m ? m[0] : txt.slice(0, 120) };
+      });
+      throw new Error(`LOGIN_FAILED: ${diag.tip} @${diag.url}`);
+    }
   }
 }
 
@@ -204,6 +217,35 @@ try {
     const opts = await searchOptions(company.short || "平安银行");
     await closeDialog();
     result({ status: "canary", found: (opts || []).length });
+    process.exit(0);
+  }
+
+  // 第二轮起的重试流程:浏览器只负责搜,AI 选号,选完再用 pick 模式回来提交。
+  // search 模式:逐词搜索,原样返回每个关键词的候选账号列表,不做任何匹配判断。
+  if (mode === "search") {
+    const kws = (company.retry_kws && company.retry_kws.length)
+      ? company.retry_kws : buildCandidates();
+    await openDialog();
+    const per_kw = [];
+    for (const kw of kws) {
+      const opts = await searchOptions(kw);
+      per_kw.push({ kw, opts: (opts || []).slice(0, 30) });
+    }
+    await closeDialog();
+    result({ status: "searched", company_id: company.company_id, per_kw });
+    process.exit(0);
+  }
+
+  // pick 模式:按 AI 选定的账号名重搜并点击提交;重搜后选项不在列表里视为提交失败。
+  if (mode === "pick") {
+    await openDialog();
+    const opts = await searchOptions(company.pick_kw);
+    const exact = (opts || []).find((o) => o.trim() === company.pick_target);
+    let ok = false;
+    if (exact) ok = await pickAndSubmit(exact);
+    await closeDialog();
+    result({ status: ok ? "added" : "submit_failed",
+             name: ok ? company.pick_target : "", company_id: company.company_id });
     process.exit(0);
   }
 

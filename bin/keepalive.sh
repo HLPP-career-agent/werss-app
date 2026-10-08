@@ -15,6 +15,17 @@ if ! mkdir "$LOCK" 2>/dev/null; then
 fi
 trap 'rmdir "$LOCK" 2>/dev/null' EXIT
 
+# ---- 0. 在场闸：菜单栏不在 = 整套静默 ----
+# 菜单栏是本系统唯一的"在场"信号与状态呈现面。它退出（launchd 正常退出，不会自己回来）
+# 就等于用户不在了：此时继续拉 Docker/容器/runner、继续发通知，用户在面板上看不到任何
+# 状态，只会收到无入口的横幅 —— 感知为缺陷而非功能。因此这里直接退出：
+# 不检测授权、不拉服务、不发通知、不写事件日志。
+# 菜单栏回来后由它自己 30 秒内自检并接管提醒；keepalive 下一轮（≤30 分钟）恢复全套。
+if ! menubar_present; then
+  log "[keepalive] 菜单栏未在场（用户已退出）→ 整套静默：本轮不做任何检测/拉起/通知"
+  exit 0
+fi
+
 STATE="$LOGS/keepalive_fails"
 FAILS=$(cat "$STATE" 2>/dev/null || echo 0)
 ok=1
@@ -50,6 +61,7 @@ if runner_alive; then
 elif [ "$(slice_remaining)" -gt 0 ]; then
   log "[keepalive] runner 未运行且还有 $(slice_remaining) 条任务，拉起…"
   start_runner
+  python3 "$WERSS_ROOT/bin/ev.py" log keepalive "runner 未运行且有 $(slice_remaining) 条任务,自动拉起" >/dev/null 2>&1 || true
   sleep 60
   if ! runner_alive; then
     notify "werss 保活" "runner 拉起失败，请查看 $BATCH/runner.log"
@@ -66,11 +78,17 @@ if app_alive; then
       --data-urlencode "username=$WERSS_ADMIN_USER" \
       --data-urlencode "password=$WERSS_ADMIN_PASS" 2>/dev/null | python3 -c "import sys,json;print(json.load(sys.stdin).get('data',{}).get('access_token',''))" 2>/dev/null)
   if [ -n "$TOK" ]; then
+    # 登录成功 → 清掉 login 告警。缺这一步 alert-state-login 会永久残留
+    # （notify_important 只有 fail 路径，清除只发生在 alert_clear），
+    # 于是菜单栏与控制台会一直显示一个几周前的登录失败（2026-10-08 实测残留两天）。
+    alert_clear login
     WR=$(curl -s -m 10 -X POST "$WERSS_APP_URL/api/v1/wx/weread/test" -H "Authorization: Bearer $TOK" 2>/dev/null)
     if ! echo "$WR" | grep -qiE 'true|有效|success|"code":200'; then
       log "[keepalive] weread 授权疑似失效，发提醒"
-      notify_important weread "微信读书授权失效，请扫码" \
-        "文章正文采集暂停（账号添加不受影响）。处理：双击 WERSS控制台.app 一键直达扫码页（自动登录）。登录账密：$WERSS_ADMIN_USER / $WERSS_ADMIN_PASS"
+      # 文案别再写"账号添加不受影响"(2026-10-04 实测为假):公众号搜索与微信读书
+      # 共用同一套微信授权，授权一失效，搜索接口同样返回 50001，批量添加会一起停。
+      notify_important weread "微信授权失效，请扫码" \
+        "文章正文采集与公众号搜索/添加均已暂停。处理：双击 WERSS控制台.app 一键直达扫码页（自动登录）。登录账密：$WERSS_ADMIN_USER / $WERSS_ADMIN_PASS"
     else
       alert_clear weread
     fi
@@ -87,7 +105,11 @@ if app_alive; then
     fi
   else
     log "[keepalive] 管理端登录失败（检查 config.env 凭据）"
-    notify_important login "管理端登录失败" "请检查 config.env 的 WERSS_ADMIN_USER / WERSS_ADMIN_PASS"
+    # 必须点明"微信授权检测被跳过"：拿不到 token 时下面整段 wxauth 探测不会执行，
+    # 于是微信授权失效会静默（2026-10-04 事故里 keepalive 正是这样只报了登录失败，
+    # 而真实主因是授权失效，两者叠加导致 7 小时无人察觉）。
+    notify_important login "管理端登录失败，微信授权状态未知" \
+      "无法登录 we-mp-rss，因此本次未检测微信授权是否失效（可能两者都坏了）。处理：先查 config.env 的 WERSS_ADMIN_USER / WERSS_ADMIN_PASS，确认容器 database 正常；恢复后重跑本检测。"
   fi
 else
   log "[keepalive] 应用未响应（容器标记 Up 但 HTTP 不通）"
@@ -98,6 +120,9 @@ fi
 if [ -f "$WERSS_ROOT/data/db.db" ]; then
   python3 "$WERSS_ROOT/bin/jobs.py" scan --quiet >> "$LOGS/jobs_scan.log" 2>&1 || true
 fi
+
+# ---- 4.7 事件日志清理(普通事件留7天,已添加豁免;菜单栏全量日志窗口数据源) ----
+python3 "$WERSS_ROOT/bin/ev.py" prune 7 >/dev/null 2>&1 || true
 
 # ---- 5. 每日一次自动更新检查（GitHub Release，见 bin/update.sh）----
 if [ "$(date +%F)" != "$(cat "$LOGS/.last-update-check" 2>/dev/null)" ]; then

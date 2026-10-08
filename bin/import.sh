@@ -10,7 +10,7 @@ if [ -z "$BK" ] || [ ! -f "$BK" ]; then
 fi
 if [ -z "$BK" ] || [ ! -f "$BK" ]; then
   echo "用法: $0 <werss-backup-*.tar.gz>（也可先放入 backups/ 目录自动识别）"
-  notify "导入失败" "未找到备份包"
+  notify_now "导入失败" "未找到备份包"
   exit 1
 fi
 BK="$(cd "$(dirname "$BK")" && pwd)/$(basename "$BK")"
@@ -98,5 +98,5 @@ log "[import] 核对: $VERIFY"
 # ---- 7. 起 runner ----
 start_runner
 
-notify "导入完成" "$VERIFY｜$NOW"
+notify_now "导入完成" "$VERIFY｜$NOW"
 log "[import] 完成。旧数据保留在 $PRE（确认无误后可手动清理）"

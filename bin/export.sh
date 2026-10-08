@@ -92,7 +92,7 @@ print(m.get('feeds', '?'), m.get('articles', '?'), m.get('slice_remaining', '?')
 " 2>/dev/null)
 IFS='|' read -r FEEDS ARTICLES SLICE_LEFT PROGRESS <<< "$META"
 : "${FEEDS:=?}" "${ARTICLES:=?}" "${SLICE_LEFT:=?}"
-notify "备份完成" "$OUT ($SIZE)｜下一步: 拷到新机放入 backups/ 双击交接导入"
+notify_now "备份完成" "$OUT ($SIZE)｜下一步: 拷到新机放入 backups/ 双击交接导入"
 
 BAR=$(printf '━%.0s' {1..44})
 echo; echo "$BAR"

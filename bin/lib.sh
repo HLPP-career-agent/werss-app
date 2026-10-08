@@ -43,22 +43,42 @@ werss_notify() {
   echo "$(date '+%m-%d %H:%M:%S') osascript ${5:-}" >> "$LOGS/notify.log"
 }
 
+# ---- 在场闸：菜单栏图标是整套系统唯一的"在场"信号 ----
+# 菜单栏不在 = 用户主动退出（launchd KeepAlive SuccessfulExit=false，不会自己回来）。
+# 此时任何后台通知/自动恢复都是"用户感知不到"的：状态在面板里看不见，
+# 用户只会收到一条无入口的横幅 → 感知为缺陷而不是功能。所以一律静默。
+menubar_present() { pgrep -f "WERSS菜单栏.app/Contents/MacOS/main" >/dev/null 2>&1; }
+
 # macOS 通知（右上角横幅+声音；信息提示，操作请用 WERSS控制台.app）
+# **后台/自治**通知：受在场闸约束，菜单栏不在则静默落日志。
 #   notify "标题" "正文"
 notify() {
+  if menubar_present; then
+    werss_notify "werss" "${1:-}" "${2:-}" "Glass" "info"
+  else
+    echo "$(date '+%m-%d %H:%M:%S') [info-suppressed] ${1:-}" >> "$LOGS/notify.log"
+  fi
+}
+
+# **用户亲手触发**的流程（双击控制台.app / 导入导出 / 安装 / 扫码页）：
+# 用户就站在终端前等结果，属"感知得到"的反馈，不受在场闸约束。
+#   notify_now "标题" "正文"
+notify_now() {
   werss_notify "werss" "${1:-}" "${2:-}" "Glass" "info"
 }
 
-# 需要人介入的提醒（声音更醒目；正文写清用控制台怎么处理）
-# 菜单栏应用在跑时不发（它每 30 秒刷新状态、自己发可点击通知，避免重复轰炸）
+# 需要人介入的提醒：**永不自行发系统通知**，只落状态与日志。
+# - 菜单栏在场：它每 30 秒自检 status.sh 并发可点击通知（自带 1800s 冷却，见
+#   menubar_app.swift:594 notifyOnTransitions），这里只写 .alert-state-* 供
+#   WERSS控制台.app 判断该开扫码页，避免重复轰炸。
+# - 菜单栏不在场：整套静默，由 keepalive.sh 顶部的在场闸兜住。
+# 历史教训：2026-10-08 用户反馈"菜单已退出，却每 31 分钟被 osascript 通知轰炸"，
+#   根因就是本函数曾在菜单栏缺席时用 osascript 兜底推送——与"服务依附可见 UI"相反。
 #   notify_important "状态键" "标题" "正文"
 notify_important() {
-  local key="$1" title="$2" body="$3"
-  if pgrep -f "WERSS菜单栏.app" >/dev/null 2>&1; then
-    echo fail > "$LOGS/.alert-state-$key"   # 菜单栏会接管提醒
-    return
-  fi
-  werss_notify "werss 需要处理" "$title" "$body" "Sosumi" "$key"
+  local key="$1" title="$2" where
+  if menubar_present; then where="menubar-present(owned-by-menubar)"; else where="menubar-absent(silent)"; fi
+  echo "$(date '+%m-%d %H:%M:%S') [alert:$key] $where $title" >> "$LOGS/notify.log"
   echo fail > "$LOGS/.alert-state-$key"
 }
 

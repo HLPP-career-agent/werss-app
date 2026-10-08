@@ -494,6 +494,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var jobsUnseen = 0
 
     func applicationDidFinishLaunching(_ n: Notification) {
+        dedupeInstances()
         Notifier.shared.bootstrap()
         samples = History.load()
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -501,10 +502,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem.button?.toolTip = "微信公众号采集系统"
         rebuildMenu()
         refresh()
+        // 退出菜单栏会停掉 runner + 容器（用户定规则：关掉图标=这套服务不再需要），
+        // 所以图标回来时服务是停的。立即补一轮保活把全套拉回来，不必干等 keepalive 的
+        // 30 分钟间隔（否则菜单栏会先红着显示故障，等半小时才自愈）。
+        // keepalive.sh 有在场闸、且全程幂等（已在跑就跳过），重复触发无副作用。
+        runSh("bash '\(root)/bin/keepalive.sh' >> '\(root)/logs/launchd-keepalive.log' 2>&1")
         Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in self?.refresh() }
         // 深链/自动化：启动即打开审核窗口
         if CommandLine.arguments.contains("--open-review") {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { ReviewWindowController.shared.show() }
+        }
+    }
+
+    /// 单实例守卫:同可执行文件的多实例按 pid 定胜负,只保留最新(launchd KeepAlive
+    /// 与手动 open 撞车时自动收敛,2026-10-04 双实例事故的兜底)。
+    private func dedupeInstances() {
+        let myPath = Bundle.main.executableURL?.path ?? CommandLine.arguments.first
+        let mine = ProcessInfo.processInfo.processIdentifier
+        let allApps = NSWorkspace.shared.runningApplications
+        let others = allApps
+            .filter { $0.processIdentifier != mine && $0.executableURL?.path == myPath }
+        for other in others where other.processIdentifier > mine {
+            exit(0)   // 已有更新的实例在跑,自己退出
+        }
+        for other in others where other.processIdentifier < mine {
+            kill(other.processIdentifier, SIGTERM)   // 自己最新,淘汰旧实例
         }
     }
 
@@ -559,6 +581,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func notifyOnTransitions() {
+        // 扫码事件:授权状态变化(失效/恢复)由菜单栏实时写日志,30 秒内可见;keepalive 不再重复发。
+        // 此处 st 已是新数据、prev* 是上一轮数据,语义与下方通知逻辑一致。
+        if st.wereadFail != prevWereadFail {
+            emitEvent("scan", detail: st.wereadFail
+                ? "微信读书授权失效,需扫码(文章正文采集暂停,账号添加不受影响)"
+                : "微信读书授权已恢复",
+                state: st.wereadFail ? "fail" : "ok")
+        }
+        if st.wxAuthFail != prevWxAuthFail {
+            emitEvent("scan", detail: st.wxAuthFail
+                ? "微信公众号主授权失效,需扫码(公众号搜索/添加已停,金丝雀自动拦截)"
+                : "微信公众号主授权已恢复",
+                state: st.wxAuthFail ? "fail" : "ok")
+        }
         let now = Date()
         if st.wereadFail && (!prevWereadFail || lastWereadNag == nil || now.timeIntervalSince(lastWereadNag!) > 1800) {
             Notifier.shared.post(id: "werss-weread",
@@ -650,11 +686,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             item.view = row
             menu.addItem(item)
         }
-        // 顶部：Ego 操作最新 3 条过程日志（来自 batch/log_<N>.txt），跟其它状态行保持一致字号/对齐，前面加彩色小圆点区分类型
+        // 顶部：Ego 操作最新 5 条过程日志（来自 batch/log_<N>.txt），跟其它状态行保持一致字号/对齐，前面加彩色小圆点区分类型；全量回看走「全量日志…」窗口
         let recentLogs = readLastProcessLog()
         if !recentLogs.isEmpty {
             menu.addItem(NSMenuItem.separator())
-            for entry in recentLogs.prefix(3) {
+            for entry in recentLogs.prefix(5) {
                 addStatusRow(makeLogAttributedString(entry))
             }
         }
@@ -727,6 +763,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             jobsTitle = "招聘帖审核（无待审）"
         }
         menu.addItem(mkItem(jobsTitle, action: #selector(openReview), bold: jobsUnseen > 0))
+        menu.addItem(mkItem("全量日志…", action: #selector(openLogs)))
 
         if st.wereadFail || st.wxAuthFail || st.runnerDown || st.appDown || st.dockerDown {
             menu.addItem(NSMenuItem.separator())
@@ -878,6 +915,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return result
     }
     @objc func openReview() { ReviewWindowController.shared.show() }
+    @objc func openLogs() { LogsWindowController.shared.show() }
     @objc func openAdmin() { runSh("open http://localhost:8001/") }
     @objc func openScan() {
         statusItem.button?.title = "ego ⏳"
@@ -912,7 +950,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
     @objc func doExport() { NSWorkspace.shared.open(rootURL.appendingPathComponent("交接导出.command")) }
     @objc func doImport() { NSWorkspace.shared.open(rootURL.appendingPathComponent("交接导入.command")) }
-    @objc func quit() { NSApplication.shared.terminate(nil) }
+    /// 退出菜单栏 = 本项目相关服务（采集 runner、we-mp-rss 容器）用户都不再需要了
+    /// （2026-10-08 用户定规则：「关闭 menubar icon 意味着这件事相关的服务我都不再需要了」）。
+    /// 派发停服后立即退出 UI；stop.sh 在后台收尾（compose stop 只停不删，数据全在 bind mount）。
+    /// 刻意不挂 applicationWillTerminate：那会让崩溃路径也停服，而崩溃时 launchd
+    /// （KeepAlive SuccessfulExit=false）会自动拉回菜单栏，服务本就该继续。
+    @objc func quit() {
+        runSh("bash '\(root)/bin/stop.sh' >> '\(root)/logs/stop.log' 2>&1")
+        NSApplication.shared.terminate(nil)
+    }
 }
 
 // 入口（多文件编译不能用顶层表达式，@main 是标准方式）

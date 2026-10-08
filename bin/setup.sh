@@ -146,4 +146,4 @@ echo "  · 每 30 分钟自动保活；需要你时会弹可点击的通知（�
 echo "  · 每天自动检查 GitHub Release 并自我更新"
 echo "  · 日常看状态/打开管理页：双击 WERSS控制台.app"
 echo "  · 换机交接：双击 交接导出.command / 交接导入.command"
-notify "werss-app 安装完成" "系统已就绪并进入自动保活"
+notify_now "werss-app 安装完成" "系统已就绪并进入自动保活"

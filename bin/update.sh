@@ -73,7 +73,8 @@ rm -rf "$STAGE"
 # 4. 生效：launchd 模板可能有变 → 重装；compose 定义可能有变 → up -d 幂等重建；
 #    runner 换新代码 → 重启
 chmod +x "$WERSS_ROOT"/bin/*.sh "$WERSS_ROOT"/batch/*.sh "$WERSS_ROOT"/batch/*.py "$WERSS_ROOT"/*.command 2>/dev/null
-bash "$WERSS_ROOT/bin/install_launchd.sh" || true
+# 装不上 launchd 会让保活/招聘扫描静默停摆，这里不再吞错误（记录+通知后续由 install 自身输出）
+bash "$WERSS_ROOT/bin/install_launchd.sh" || log "[update] 警告：launchd 安装有失败项"
 compose up -d || true
 pkill -f "bash run_forever.sh" 2>/dev/null; pkill -f "python3 .*process_chunk.py" 2>/dev/null; sleep 2
 start_runner

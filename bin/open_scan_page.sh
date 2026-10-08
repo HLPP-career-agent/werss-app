@@ -37,13 +37,17 @@ rmdir "$LOCKD" 2>/dev/null
 rm -f "$GEN"
 echo "$(date '+%m-%d %H:%M:%S') rc=$RC out=${OUT_FULL:0:120}" >> "$LOGS/open_scan.log"
 
+TARGET=$([ "$PAGE_PATH" = "/wechat-status" ] && echo "公众号主授权" || echo "微信读书")
+
 if echo "$OUT_FULL" | grep -q "SCAN_PAGE_READY"; then
   open -a "ego lite" 2>/dev/null   # 把扫码窗口带到前台
   log "[open_scan] 扫码页已在前台 ($PAGE_PATH)"
+  python3 "$WERSS_ROOT/bin/ev.py" log scan state=open "${TARGET}扫码页已打开,等待扫码" >/dev/null 2>&1 || true
 else
   # 兜底：默认浏览器直达目标页（未登录会自动跳登录页并带 redirect=参数，
   # 登录成功后自动跳回本页——原仓库自带能力，无需改动）。ego 故障时才走此路。
   open "$WERSS_APP_URL$PAGE_PATH" 2>/dev/null
-  notify "请两步完成扫码" "第1步 登录（账密 $WERSS_ADMIN_USER / $WERSS_ADMIN_PASS），登录后自动跳回本页；第2步 点页面「扫码授权」出二维码"
+  notify_now "请两步完成扫码" "第1步 登录（账密 $WERSS_ADMIN_USER / $WERSS_ADMIN_PASS），登录后自动跳回本页；第2步 点页面「扫码授权」出二维码"
   log "[open_scan] ego 失败，已用默认浏览器兜底（两步指引已推送）"
+  python3 "$WERSS_ROOT/bin/ev.py" log scan state=open "${TARGET}扫码页已打开(默认浏览器兜底),等待扫码" >/dev/null 2>&1 || true
 fi

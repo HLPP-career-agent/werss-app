@@ -13,3 +13,7 @@ services:
       - GATHER.CONTENT_BATCH_SIZE=30
       - GATHER.MODEL=weread_mp
     restart: unless-stopped
+    # 优雅停机宽限期。实测 we-mp-rss 10s 内退不完会被 SIGKILL（Exited 137），
+    # 而 ./data 是 bind mount、SQLite 走 WAL，强杀有 WAL 未 checkpoint 的风险。
+    # 显式给 30s 让它自己收尾，bin/stop.sh 的 compose stop 同样受此约束。
+    stop_grace_period: 30s

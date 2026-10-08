@@ -258,7 +258,9 @@ def cmd_scan(args):
                     item["positions"] = str(verdict.get("positions") or "")[:80]
                     item["reason"] = str(verdict.get("reason") or "")[:120]
                     item.pop("model_error", None)
-                    if "status" not in item:  # 首次判定才定状态；复判不覆盖人工决定
+                    # 首次判定才定状态；复判不覆盖「人工决定」，但必须覆盖失败占位
+                    # （否则模型重判为非招聘也会卡在 pending —— 见下方 status_from_error）
+                    if item.pop("status_from_error", False) or "status" not in item:
                         item["status"] = "pending" if verdict["is_recruitment"] else "skipped"
                         if not verdict["is_recruitment"]:
                             item["auto"] = True
@@ -268,7 +270,9 @@ def cmd_scan(args):
                 else:
                     item["verdict"] = None
                     item["model_error"] = err[:200]
-                    item.setdefault("status", "pending")  # 失败保持待审，下轮重试
+                    # 失败保持待审（让人看得见），并打标记：重判时要允许覆盖这个占位状态
+                    item.setdefault("status", "pending")
+                    item["status_from_error"] = True
                     n_fail += 1
                 state["items"][_id] = item
                 if not quiet:
